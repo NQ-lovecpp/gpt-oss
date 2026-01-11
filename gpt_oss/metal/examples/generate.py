@@ -5,17 +5,17 @@ import sys
 
 from gpt_oss.metal import Context, Model
 
+# 固定的模型路径
+MODEL_PATH = "/Users/ningqing/Code/gpt-oss/gpt-oss-20b/metal/model.bin"
 
 parser = argparse.ArgumentParser(description='Chat with gpt-oss', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-parser.add_argument('model', metavar='PATH', type=str, help='Path to gpt-oss checkpoint')
 parser.add_argument('-p', '--prompt', type=str, required=True, help='Prompt')
 parser.add_argument('-l', '--limit', type=int, default=100, help='Number of tokens to generate')
-parser.add_argument('--context-length', type=int, default=0, help='The maximum context length')
-
+parser.add_argument('--context-length', type=int, default=2048, help='The maximum context length')
 
 def main(args):
     options = parser.parse_args(args)
-    model = Model(options.model)
+    model = Model(MODEL_PATH)
 
     context = Context(model, context_length=options.context_length)
     context.append(options.prompt)
