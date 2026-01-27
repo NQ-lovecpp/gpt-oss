@@ -6,3 +6,5 @@ __pycache__
 node_modules/
 *.log
 gpt-oss-20b/
+.DS_Store
+**/.DS_Store
