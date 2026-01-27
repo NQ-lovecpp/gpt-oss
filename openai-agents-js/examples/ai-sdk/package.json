@@ -1,0 +1,22 @@
+{
+  "private": true,
+  "name": "ai-sdk",
+  "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.9",
+    "@ai-sdk/google": "^3.0.6",
+    "@ai-sdk/openai": "^3.0.7",
+    "@openai/agents": "workspace:*",
+    "@openai/agents-extensions": "workspace:*",
+    "@openrouter/ai-sdk-provider": "^2.0.0"
+  },
+  "scripts": {
+    "build-check": "tsc --noEmit",
+    "start": "tsx index.ts",
+    "start:gpt-5": "tsx gpt-5.ts",
+    "start:stream": "tsx stream.ts",
+    "start:image-tool-output": "tsx image-tool-output.ts"
+  },
+  "devDependencies": {
+    "ai": "^6.0.3"
+  }
+}

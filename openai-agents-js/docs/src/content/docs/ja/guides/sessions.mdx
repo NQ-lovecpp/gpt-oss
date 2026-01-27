@@ -1,0 +1,132 @@
+---
+title: セッション
+description: Persist multi-turn conversation history so agents can resume context across runs.
+---
+
+import { Code } from '@astrojs/starlight/components';
+import sessionsQuickstart from '../../../../../../examples/docs/sessions/basicSession.ts?raw';
+import manageHistory from '../../../../../../examples/docs/sessions/manageHistory.ts?raw';
+import customSession from '../../../../../../examples/docs/sessions/customSession.ts?raw';
+import sessionInputCallback from '../../../../../../examples/docs/sessions/sessionInputCallback.ts?raw';
+import responsesCompactionSession from '../../../../../../examples/docs/sessions/responsesCompactionSession.ts?raw';
+import manualCompactionSession from '../../../../../../examples/docs/sessions/responsesCompactionManualSession.ts?raw';
+
+セッションは OpenAI Agents SDK による**永続的なメモリ層**です。`Session` インターフェースを実装する任意のオブジェクトを `Runner.run` に渡すだけで、残りは SDK が処理します。セッションがある場合、ランナーは自動的に次を行います。
+
+1. 以前に保存された会話アイテムを取得し、次のターンの先頭に付与する
+2. 各実行完了後に、新しいユーザー入力とアシスタント出力を永続化する
+3. 新しいユーザーのテキストでランナーを呼び出す場合でも、中断した `RunState` から再開する場合でも、将来のターンにセッションを利用可能に保つ
+
+これにより、手動で `toInputList()` を呼び出したり、ターン間の履歴をつなぎ合わせたりする必要がなくなります。TypeScript SDK には 2 つの実装が付属します。Conversations API 用の `OpenAIConversationsSession` と、ローカル開発向けの `MemorySession` です。どちらも `Session` インターフェースを共有しているため、独自のストレージバックエンドを差し替えることができます。Conversations API 以外の着想を得るには、`examples/memory/` 配下のサンプルセッションバックエンド（Prisma、ファイルバックなど）を参照してください。OpenAI Responses モデルを使用する場合は、任意のセッションを `OpenAIResponsesCompactionSession` でラップして、[`responses.compact`](https://platform.openai.com/docs/api-reference/responses/compact) によって保存されたトランスクリプトを自動的に短くします。
+
+> Tip: このページの `OpenAIConversationsSession` の例を実行するには、`OPENAI_API_KEY` 環境変数を設定する（またはセッション構築時に `apiKey` を指定する）ことで、SDK が Conversations API を呼び出せるようにしてください。
+
+---
+
+## クイックスタート
+
+`OpenAIConversationsSession` を使用して [Conversations API](https://platform.openai.com/docs/api-reference/conversations) とメモリを同期するか、他の任意の `Session` 実装に置き換えます。
+
+<Code
+  lang="typescript"
+  code={sessionsQuickstart}
+  title="Conversations API をセッションメモリとして使う"
+/>
+
+同じセッションインスタンスを再利用すると、エージェントは毎ターンの前に会話履歴全体を受け取り、新しいアイテムを自動的に永続化します。別の `Session` 実装に切り替えても、他のコード変更は不要です。
+
+---
+
+## ランナーによるセッションの使用
+
+- **各実行の前に** セッション履歴を取得し、新しいターンの入力とマージして、結合済みリストをエージェントに渡します
+- **非ストリーミング実行の後に** `session.addItems()` を 1 回呼び出すだけで、直近のターンの元のユーザー入力とモデル出力の両方を永続化します
+- **ストリーミング実行の場合** まずユーザー入力を書き込み、ターン完了時にストリーミングされた出力を追記します
+- **`RunResult.state` から再開するときは**（承認やその他の中断のため）同じ `session` を渡し続けます。再開したターンは入力の再準備なしでメモリに追加されます
+
+---
+
+## 履歴の確認と編集
+
+セッションはシンプルな CRUD ヘルパーを公開しているため、「取り消し」や「チャットの消去」、監査機能を構築できます。
+
+<Code
+  lang="typescript"
+  code={manageHistory}
+  title="保存済みアイテムの読み取りと編集"
+/>
+
+`session.getItems()` は保存された `AgentInputItem[]` を返します。`popItem()` を呼び出すと最後のエントリを削除できます。エージェントを再実行する前のユーザー修正に便利です。
+
+---
+
+## 任意ストレージの利用
+
+`Session` インターフェースを実装して、メモリの裏側に Redis、DynamoDB、SQLite、その他のデータストアを使用します。必要なのは 5 つの非同期メソッドだけです。
+
+<Code
+  lang="typescript"
+  code={customSession}
+  title="カスタムインメモリセッション実装"
+/>
+
+カスタムセッションを使えば、保持ポリシーの適用、暗号化の追加、永続化前に各会話ターンへメタデータを付与することができます。
+
+---
+
+## 履歴と新規アイテムのマージ制御
+
+実行入力として `AgentInputItem` の配列を渡すときは、`sessionInputCallback` を指定して保存済み履歴とのマージを決定的に行えます。ランナーは既存の履歴をロードし、**モデル呼び出しの前に** このコールバックを呼び出し、返された配列をそのターンの完全な入力としてモデルに渡します。このフックは、古いアイテムのトリミング、ツール結果の重複排除、モデルに見せたいコンテキストのみを強調するのに最適です。
+
+<Code
+  lang="typescript"
+  code={sessionInputCallback}
+  title="sessionInputCallback で履歴を切り詰める"
+/>
+
+文字列入力の場合、ランナーは履歴を自動マージするため、このコールバックは任意です。
+
+---
+
+## 承認と再開可能な実行の取り扱い
+
+Human in the loop (人間の介入) のフローでは、承認待ちで実行を一時停止することがよくあります。
+
+```typescript
+const result = await runner.run(agent, 'Search the itinerary', {
+  session,
+  stream: true,
+});
+
+if (result.requiresApproval) {
+  // ... collect user feedback, then resume the agent in a later turn
+  const continuation = await runner.run(agent, result.state, { session });
+  console.log(continuation.finalOutput);
+}
+```
+
+以前の `RunState` から再開すると、新しいターンは同じメモリレコードに追記され、単一の会話履歴が維持されます。Human in the loop (人間の介入)（HITL）フローは完全に互換性を保ちます。承認チェックポイントは引き続き `RunState` を往復し、セッションはトランスクリプトを完全な状態で保持します。
+
+---
+
+## OpenAI Responses の履歴の自動圧縮
+
+`OpenAIResponsesCompactionSession` は任意の `Session` を装飾し、OpenAI Responses API に依存してトランスクリプトを短く保ちます。各ターンの永続化後に、ランナーは最新の `responseId` を `runCompaction` に渡します。これは、判断用フックが true を返した場合に `responses.compact` を呼び出します。デフォルトのトリガーでは、ユーザー以外のアイテムが少なくとも 10 個蓄積された時点で 1 度圧縮します。`shouldTriggerCompaction` をオーバーライドして、トークン数やカスタムヒューリスティクスに基づく判断に変更できます。デコレーターは基盤となるセッションをクリアして圧縮後の出力で書き換えるため、サーバー管理の履歴フローが異なる `OpenAIConversationsSession` との併用は避けてください。
+
+<Code
+  lang="typescript"
+  code={responsesCompactionSession}
+  title="OpenAIResponsesCompactionSession でセッションを装飾する"
+/>
+
+### 低遅延ストリーミングのための手動圧縮
+
+圧縮は基盤となるセッションをクリアして書き換えるため、SDK はストリーミング実行を解決する前にそれを待機します。圧縮が重い場合、最後の出力トークン後も `result.completed` が数秒間保留になることがあります。低遅延のストリーミングや素早いターンテイクのためには、自動圧縮を無効にして、ターン間（またはアイドル時間）に自分で `runCompaction` を呼び出してください。
+
+<Code
+  lang="typescript"
+  code={manualCompactionSession}
+  title="自動圧縮を無効化し、ターン間で圧縮する"
+/>
+
+履歴をアーカイブやハンドオフの前に縮小するため、いつでも `runCompaction({ force: true })` を呼び出せます。`DEBUG=openai-agents:openai:compaction` を有効にすると、圧縮の判断をトレースできます。

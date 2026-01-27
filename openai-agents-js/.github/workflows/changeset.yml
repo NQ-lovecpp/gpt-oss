@@ -1,0 +1,370 @@
+name: Changeset
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, edited]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to validate."
+        required: true
+        type: number
+
+jobs:
+  changeset-validation:
+    # Use pull_request_target so secrets are available for label/milestone updates.
+    # Always checkout base and fetch head to avoid executing forked code and reduce skipped checks.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Ensure main workflow
+        if: ${{ github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main' }}
+        run: |
+          echo "This workflow must be dispatched from main."
+          exit 1
+
+      - name: Resolve PR context
+        id: pr
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        env:
+          MANUAL_PR_NUMBER: ${{ inputs.pr_number || '' }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const isManual = context.eventName === 'workflow_dispatch';
+            let pr;
+            if (isManual) {
+              const prNumber = Number(process.env.MANUAL_PR_NUMBER);
+              if (!prNumber) {
+                core.setFailed('workflow_dispatch requires pr_number input.');
+                return;
+              }
+              const { data } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+              });
+              pr = data;
+            } else {
+              pr = context.payload.pull_request;
+            }
+            if (!pr) {
+              core.setFailed('Missing pull request context.');
+              return;
+            }
+            const headRepo = pr.head.repo.full_name;
+            const repoFullName = `${context.repo.owner}/${context.repo.repo}`;
+            core.setOutput('pr_number', pr.number);
+            core.setOutput('base_sha', pr.base.sha);
+            core.setOutput('head_sha', pr.head.sha);
+            core.setOutput('head_repo', headRepo);
+            core.setOutput('is_fork', headRepo !== repoFullName);
+
+      - name: Checkout base
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        with:
+          fetch-depth: 0
+          ref: ${{ steps.pr.outputs.base_sha }}
+      - name: Fetch PR head
+        env:
+          PR_HEAD_REPO: ${{ steps.pr.outputs.head_repo }}
+          PR_HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        run: |
+          # Fetch commit objects only; do not execute forked code.
+          git fetch --no-tags --prune --recurse-submodules=no \
+            "https://github.com/${PR_HEAD_REPO}.git" \
+            "${PR_HEAD_SHA}"
+      - name: Install pnpm
+        uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061
+        with:
+          version: 10.28.0
+          run_install: false
+      - name: Setup Node
+        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238
+        with:
+          node-version: 22
+
+      - name: Run lightweight changeset check (forks)
+        if: ${{ github.event_name != 'workflow_dispatch' && steps.pr.outputs.is_fork == 'true' }}
+        run: |
+          pnpm changeset:validate-lite -- \
+            --base ${{ steps.pr.outputs.base_sha }} \
+            --head ${{ steps.pr.outputs.head_sha }}
+
+      - name: Generate changeset prompt
+        id: changeset_prompt
+        if: ${{ github.actor != 'dependabot[bot]' && (github.event_name == 'workflow_dispatch' || steps.pr.outputs.is_fork != 'true') }}
+        run: |
+          pnpm changeset:validate-prompt -- \
+            --ci \
+            --output .github/codex/prompts/changeset-validation.generated.md \
+            --base ${{ steps.pr.outputs.base_sha }} \
+            --head ${{ steps.pr.outputs.head_sha }}
+
+      - name: Prepare Codex output dir
+        if: ${{ github.actor != 'dependabot[bot]' && (github.event_name == 'workflow_dispatch' || steps.pr.outputs.is_fork != 'true') }}
+        run: mkdir -p .github/codex/outputs
+
+      - name: Run Codex changeset validation
+        id: run_codex
+        if: ${{ github.actor != 'dependabot[bot]' && (github.event_name == 'workflow_dispatch' || steps.pr.outputs.is_fork != 'true') }}
+        uses: openai/codex-action@086169432f1d2ab2f4057540b1754d550f6a1189
+        with:
+          openai-api-key: ${{ secrets.PROD_OPENAI_API_KEY }}
+          prompt-file: .github/codex/prompts/changeset-validation.generated.md
+          output-file: .github/codex/outputs/changeset-validation.json
+          output-schema-file: .github/codex/schemas/changeset-validation.json
+          codex-args: '["--full-auto"]'
+          sandbox: read-only
+          safety-strategy: drop-sudo
+
+      - name: Validate Codex output
+        id: validate_codex
+        if: ${{ steps.run_codex.conclusion == 'success' }}
+        run: pnpm changeset:validate-result -- .github/codex/outputs/changeset-validation.json
+
+      - name: Assign milestone
+        if: ${{ steps.run_codex.conclusion == 'success' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: pnpm changeset:assign-milestone -- .github/codex/outputs/changeset-validation.json
+
+      - name: Sync package labels
+        if: ${{ steps.run_codex.conclusion == 'success' || github.actor == 'dependabot[bot]' || steps.pr.outputs.is_fork == 'true' }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        env:
+          BASE_SHA: ${{ steps.pr.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { execFileSync } = require('child_process');
+
+            const baseSha = process.env.BASE_SHA;
+            const headSha = process.env.HEAD_SHA;
+            const issueNumber = Number(process.env.PR_NUMBER || context.issue.number);
+
+            const changedFilesDiff = execFileSync(
+              'git',
+              ['diff', '--name-only', baseSha, headSha],
+              { encoding: 'utf8' },
+            ).trim();
+            const changedFiles = changedFilesDiff
+              ? changedFilesDiff.split(/\r?\n/).filter(Boolean)
+              : [];
+
+            // Read changeset paths from git directly to avoid shell interpolation.
+            const diff = execFileSync(
+              'git',
+              ['diff', '--name-only', baseSha, headSha, '--', '.changeset'],
+              { encoding: 'utf8' },
+            ).trim();
+            const files = diff ? diff.split(/\r?\n/).filter(Boolean) : [];
+            const changesetFiles = files.filter(
+              (file) => file.endsWith('.md') && !file.endsWith('README.md'),
+            );
+
+            function readJsonFromGit(ref, filePath) {
+              try {
+                return JSON.parse(
+                  execFileSync('git', ['show', `${ref}:${filePath}`], {
+                    encoding: 'utf8',
+                  }),
+                );
+              } catch (_error) {
+                return null;
+              }
+            }
+
+            function sortObject(value) {
+              if (Array.isArray(value)) {
+                return value.map(sortObject);
+              }
+              if (value && typeof value === 'object') {
+                return Object.keys(value)
+                  .sort()
+                  .reduce((acc, key) => {
+                    acc[key] = sortObject(value[key]);
+                    return acc;
+                  }, {});
+              }
+              return value;
+            }
+
+            function deepEqual(left, right) {
+              return (
+                JSON.stringify(sortObject(left)) ===
+                JSON.stringify(sortObject(right))
+              );
+            }
+
+            let devDependenciesOnly = false;
+            if (changedFiles.includes('package.json')) {
+              const basePackageJson = readJsonFromGit(baseSha, 'package.json');
+              const headPackageJson = readJsonFromGit(headSha, 'package.json');
+              if (basePackageJson && headPackageJson) {
+                const { devDependencies: _baseDev, ...baseRest } =
+                  basePackageJson;
+                const { devDependencies: _headDev, ...headRest } =
+                  headPackageJson;
+                devDependenciesOnly = deepEqual(baseRest, headRest);
+              }
+            }
+
+            const docsChanged = changedFiles.some((file) =>
+              file.startsWith('docs/'),
+            );
+            const projectConfigFiles = new Set([
+              'eslint.config.mjs',
+              'pnpm-workspace.yaml',
+              'tsc-multi.json',
+              'tsconfig.examples.json',
+              'tsconfig.json',
+              'tsconfig.test.json',
+              'vitest.config.ts',
+              'vitest.integration.config.ts',
+            ]);
+            const projectConfigPrefixes = ['.github/', '.codex/', 'scripts/'];
+            const projectChanged = changedFiles.some((file) => {
+              if (projectConfigFiles.has(file)) return true;
+              if (projectConfigPrefixes.some((prefix) => file.startsWith(prefix)))
+                return true;
+              if (file === 'package.json') return devDependenciesOnly;
+              if (file === 'pnpm-lock.yaml') return devDependenciesOnly;
+              return false;
+            });
+
+            const packageToLabel = {
+              '@openai/agents-core': 'package:agents-core',
+              '@openai/agents-openai': 'package:agents-openai',
+              '@openai/agents-realtime': 'package:agents-realtime',
+              '@openai/agents-extensions': 'package:agents-extensions',
+            };
+
+            const desired = new Set();
+            for (const file of changesetFiles) {
+              let content;
+              try {
+                content = execFileSync('git', ['show', `${headSha}:${file}`], {
+                  encoding: 'utf8',
+                });
+              } catch (_error) {
+                continue;
+              }
+              const parts = content.split('---');
+              if (parts.length < 3) {
+                continue;
+              }
+              const frontmatter = parts[1];
+              for (const line of frontmatter.split(/\r?\n/)) {
+                const match = line.match(/["']?([^"':]+)["']?\s*:/);
+                if (!match) continue;
+                const pkg = match[1].trim();
+                const label = packageToLabel[pkg];
+                if (label) desired.add(label);
+              }
+            }
+
+            if (docsChanged) desired.add('documentation');
+            if (projectChanged) desired.add('project');
+
+            const managedLabels = new Set(Object.values(packageToLabel));
+            managedLabels.add('documentation');
+            managedLabels.add('project');
+            const { data: issue } = await github.rest.issues.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+            });
+            const existing = issue.labels.map((label) =>
+              typeof label === 'string' ? label : label.name,
+            );
+            const preserved = existing.filter(
+              (label) => !managedLabels.has(label),
+            );
+            const finalLabels = Array.from(new Set([...preserved, ...desired]));
+
+            const normalize = (labels) => labels.slice().sort();
+            const same =
+              normalize(existing).join('\n') === normalize(finalLabels).join('\n');
+
+            if (same) {
+              console.log('Labels already up to date.');
+              return;
+            }
+
+            await github.rest.issues.setLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              labels: finalLabels,
+            });
+
+            console.log(
+              `Updated labels: ${finalLabels.join(', ') || '(none)'}`,
+            );
+
+      - name: Comment on manual run failure
+        if: ${{ github.event_name == 'workflow_dispatch' && always() }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          JOB_STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CHANGESET_CONCLUSION: ${{ steps.changeset_prompt.conclusion }}
+          CODEX_CONCLUSION: ${{ steps.run_codex.conclusion }}
+          VALIDATE_CONCLUSION: ${{ steps.validate_codex.conclusion }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const marker = '<!-- changeset-validation-manual-run -->';
+            const jobStatus = process.env.JOB_STATUS;
+            if (jobStatus === 'success') {
+              return;
+            }
+            const prNumber = Number(process.env.PR_NUMBER);
+            if (!prNumber) {
+              core.setFailed('Missing PR number for manual run comment.');
+              return;
+            }
+            const body = [
+              marker,
+              'Manual changeset validation failed.',
+              `Job status: ${jobStatus}.`,
+              `Run: ${process.env.RUN_URL}.`,
+              `Generate changeset prompt: ${process.env.CHANGESET_CONCLUSION}.`,
+              `Codex validation: ${process.env.CODEX_CONCLUSION}.`,
+              `Codex output validation: ${process.env.VALIDATE_CONCLUSION}.`,
+            ].join('\n');
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              per_page: 100,
+            });
+            const existing = comments.find(
+              (comment) =>
+                comment.user?.login === 'github-actions[bot]' &&
+                comment.body?.includes(marker),
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+              core.info(`Updated existing comment ${existing.id}`);
+              return;
+            }
+            const { data: created } = await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body,
+            });
+            core.info(`Created comment ${created.id}`);

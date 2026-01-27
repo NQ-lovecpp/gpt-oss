@@ -1,0 +1,29 @@
+# Run prettier on staged files.
+pnpm prettier $(git diff --cached --name-only --diff-filter=ACMR | sed 's| |\\ |g') --write --ignore-unknown
+git update-index --again
+
+# Run lint on staged files.
+pnpm eslint $(git diff --cached --name-only --diff-filter=ACMR | sed 's| |\\ |g') --fix
+git update-index --again
+
+# Run changeset-validation fixtures when the skill changes.
+if command -v rg >/dev/null 2>&1; then
+  if git diff --cached --name-only --diff-filter=ACMR | rg -q '^\.codex/skills/changeset-validation/'; then
+    bash .codex/skills/changeset-validation/scripts/run-fixtures.sh
+  fi
+else
+  if git diff --cached --name-only --diff-filter=ACMR | grep -q '^\.codex/skills/changeset-validation/'; then
+    bash .codex/skills/changeset-validation/scripts/run-fixtures.sh
+  fi
+fi
+
+# Check for secrets.
+if [ -z "$CI" ] && [ -z "$GITHUB_ACTIONS" ]; then
+  if ! command -v trufflehog >/dev/null 2>&1; then
+    echo "trufflehog' is not installed or not in your PATH."
+    echo "Download it from: https://github.com/trufflesecurity/trufflehog"
+    echo "Skipping secrets check due to missing trufflehog."
+    exit 1
+  fi
+  trufflehog git file://. --since-commit HEAD --fail
+fi

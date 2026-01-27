@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - ".codex/**"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/PULL_REQUEST_TEMPLATE/**"
+      - ".github/codex/**"
+      - ".husky/**"
+      - "integration-tests/**"
+      - "*.md"
+  pull_request:
+    paths-ignore:
+      - "docs/**"
+      - ".codex/**"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/PULL_REQUEST_TEMPLATE/**"
+      - ".github/codex/**"
+      - ".husky/**"
+      - "integration-tests/**"
+      - "*.md"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      NODE_OPTIONS: "--max_old_space_size=6144"
+    strategy:
+      matrix:
+        # https://nodejs.org/en/about/previous-releases
+        # Using 24.3.x due to https://github.com/pnpm/pnpm/issues/9743
+        node-version: ['20', '22', '24.3.x']
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+      - name: Install pnpm
+        uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061
+        with:
+          version: 10.28.0
+          run_install: false
+      - name: Setup Node.js
+        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'pnpm'
+      - name: Install dependencies
+        run: pnpm install
+      - name: Build all packages
+        run: pnpm build
+      - name: Check generated declarations
+        run: pnpm -r -F "@openai/*" dist:check
+      - name: Run linter
+        run: pnpm lint
+      - name: Type-check docs scripts
+        run: pnpm docs:scripts:check
+      - name: Compile examples
+        run: pnpm -r build-check
+      - name: Run tests
+        run: pnpm test
+
+  coverage:
+    runs-on: ubuntu-latest
+    needs: test
+    env:
+      NODE_OPTIONS: "--max_old_space_size=6144"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+      - name: Install pnpm
+        uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061
+        with:
+          version: 10.28.0
+          run_install: false
+      - name: Setup Node.js
+        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238
+        with:
+          node-version: 22
+          cache: 'pnpm'
+      - name: Install dependencies
+        run: pnpm install
+      - name: Build all packages
+        run: pnpm build
+      - name: Run tests with coverage
+        run: pnpm test:coverage
+      - name: Enforce coverage thresholds
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+
+          const summaryPath = 'coverage/coverage-summary.json';
+          if (!fs.existsSync(summaryPath)) {
+            console.error(`Missing coverage summary at ${summaryPath}.`);
+            process.exit(1);
+          }
+
+          const summary = JSON.parse(fs.readFileSync(summaryPath, 'utf8'));
+          const total = summary.total ?? {};
+          const thresholds = {
+            lines: 85,
+            statements: 85,
+            functions: 85,
+            branches: 80,
+          };
+
+          let failed = false;
+          for (const [key, min] of Object.entries(thresholds)) {
+            const pct = typeof total[key]?.pct === 'number' ? total[key].pct : 0;
+            const status = pct >= min ? 'OK' : 'FAIL';
+            console.log(`${status}: ${key} ${pct}% (min ${min}%)`);
+            if (pct < min) {
+              failed = true;
+            }
+          }
+
+          if (failed) {
+            process.exit(1);
+          }
+          NODE
