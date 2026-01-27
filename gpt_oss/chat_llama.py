@@ -1,6 +1,11 @@
 """
 Harmony chat with tools (Llama-Server Backend Edition)
 Modified to support HTTP backend via llama.cpp server
+
+/Users/ningqing/Library/Caches/llama.cpp/ggml-org_gpt-oss-20b-GGUF_gpt-oss-20b-mxfp4.gguf
+
+llama-server -hf ggml-org/gpt-oss-20b-GGUF --n-cpu-moe 12 -c 32768 --jinja --no-mmap
+
 """
 
 import atexit
