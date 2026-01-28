@@ -6,6 +6,8 @@ import {
   tool,
 } from '@openai/agents';
 import z from 'zod';
+import OpenAI from 'openai';
+import { OpenAIResponsesModel } from '@openai/agents';
 
 const getWeather = tool({
   name: 'getWeather',
@@ -53,37 +55,10 @@ export async function getAgent(): Promise<Agent> {
     if (!agentPromise) {
       agentPromise = (async () => {
         const mcpServers = await initializeMcpServers();
-        
-        console.log(`[MCP] Active MCP servers: ${mcpServers.active.length}`);
-        console.log(`[MCP] Failed MCP servers: ${mcpServers.failed.length}`);
-        for (const [server, error] of mcpServers.errors) {
-          console.warn(`[MCP] ${server.name} failed to connect: ${error.message}`);
-        }
 
-        // 验证每个服务器的工具
-        for (const server of mcpServers.active) {
-          try {
-            const tools = await server.listTools();
-            console.log(`[MCP] Server "${server.name}" has ${tools.length} tools:`);
-            tools.forEach((tool) => {
-              console.log(`  - ${tool.name}: ${tool.description || 'No description'}`);
-            });
-          } catch (error) {
-            console.error(`[MCP] Error listing tools from ${server.name}:`, error);
-          }
-        }
-
-        // 验证 MCP 工具是否加载成功
-        if (mcpServers.active.length > 0) {
-          try {
-            const mcpTools = await getAllMcpTools(mcpServers.active);
-            console.log(`[MCP] Total loaded ${mcpTools.length} tools from all MCP servers:`);
-            mcpTools.forEach((tool) => {
-              console.log(`  - ${tool.name}: ${tool.type === 'function' ? tool.description : 'MCP tool'}`);
-            });
-          } catch (error) {
-            console.error('[MCP] Error loading MCP tools:', error);
-          }
+        // 简要日志
+        if (mcpServers.failed.length > 0) {
+          console.warn(`[MCP] ${mcpServers.failed.length} server(s) failed to connect`);
         }
 
         // 拉取 MCP 工具并与本地工具合并
@@ -100,30 +75,26 @@ export async function getAgent(): Promise<Agent> {
 
         const agent = new Agent({
           name: 'Basic Agent',
-          instructions: 'You are a basic agent with Python execution and web browsing capabilities.',
+          instructions: `You are a helpful assistant with Python execution and web browsing capabilities.
+
+IMPORTANT: You MUST always think and reason in English, regardless of what language the user uses. Your internal reasoning process should always be in English. However, you should respond to the user in their language.
+
+For example:
+- If user asks in Chinese: Think in English internally, then respond in Chinese
+- If user asks in English: Think in English, respond in English
+- If user asks in any other language: Think in English, respond in that language
+
+This rule about reasoning in English is mandatory and must never be violated.`,
           model: 'o4-mini',
+          modelSettings: {
+            reasoning: { effort: 'medium', summary: 'detailed' },
+            text: { verbosity: 'medium' },
+          },
           tools: allTools,
           mcpServers: mcpServers.active,
         });
 
-        // 验证 Agent 的所有工具（包括 MCP 工具）
-        try {
-          // 创建一个临时的 runContext 来获取工具
-          const { RunContext } = await import('@openai/agents');
-          const tempContext = new RunContext({});
-          const allTools = await agent.getAllTools(tempContext);
-          console.log(`[Agent] Agent has ${allTools.length} total tools:`);
-          allTools.forEach((tool) => {
-            if (tool.type === 'function') {
-              console.log(`  - ${tool.name} (function): ${tool.description}`);
-            } else {
-              console.log(`  - ${tool.name} (${tool.type})`);
-            }
-          });
-        } catch (error) {
-          console.error('[Agent] Error getting all tools:', error);
-        }
-
+        console.log(`[Agent] Initialized with ${allTools.length} tools`);
         return agent;
       })();
     }

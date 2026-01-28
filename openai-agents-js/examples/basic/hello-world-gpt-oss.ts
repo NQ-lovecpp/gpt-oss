@@ -22,10 +22,10 @@ async function main() {
         baseURL: 'http://localhost:11434/v1',
         apiKey: 'ollama',
       }),
-      'gpt-oss:20b',
+      'gpt-oss:120b-cloud',
     ),
     instructions: 'You answer questions concisely and to the point.',
-    modelSettings: { reasoning: { effort: 'low' } },
+    modelSettings: { reasoning: { effort: 'high' } },
   });
 
   const question = 'Tell me about recursion in programming.';

@@ -6,9 +6,11 @@ import { App } from '@/components/App';
 import { Approvals } from '@/components/Approvals';
 
 // 流式事件类型
-type StreamEvent = 
+type StreamEvent =
   | { type: 'init'; data: { conversationId: string } }
   | { type: 'text_delta'; data: { delta: string } }
+  | { type: 'reasoning_delta'; data: { delta: string } }
+  | { type: 'reasoning_item'; data: { text: string } }
   | { type: 'tool_call'; data: { name: string; arguments: string; callId: string; status: string } }
   | { type: 'tool_output'; data: { callId: string; output: string; status: string } }
   | { type: 'message'; data: { role: string; content: string } }
@@ -25,9 +27,14 @@ export default function Home() {
   >([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamingText, setStreamingText] = useState('');
-  
+  const [streamingReasoning, setStreamingReasoning] = useState('');
+
   // 用于跟踪当前的工具调用
   const pendingToolCalls = useRef<Map<string, any>>(new Map());
+  // 用于在 done 事件中访问 reasoning 内容
+  const currentReasoningRef = useRef<string>('');
+  // 用于存储历史消息的 reasoning（按消息 id 或索引）
+  const reasoningMapRef = useRef<Map<string, string>>(new Map());
 
   const processStreamEvent = useCallback((event: StreamEvent) => {
     switch (event.type) {
@@ -40,6 +47,23 @@ export default function Home() {
         setStreamingText(prev => prev + event.data.delta);
         break;
 
+      case 'reasoning_delta':
+        setStreamingReasoning(prev => {
+          const newValue = prev + event.data.delta;
+          currentReasoningRef.current = newValue;
+          return newValue;
+        });
+        break;
+
+      case 'reasoning_item':
+        // 完整的 reasoning 内容（非增量）
+        setStreamingReasoning(prev => {
+          const newValue = prev ? prev + '\n' + event.data.text : event.data.text;
+          currentReasoningRef.current = newValue;
+          return newValue;
+        });
+        break;
+
       case 'tool_call':
         // 添加工具调用到历史
         pendingToolCalls.current.set(event.data.callId, event.data);
@@ -49,7 +73,7 @@ export default function Home() {
             item => item.type === 'function_call' && (item as any).callId === event.data.callId
           );
           if (existing) return prev;
-          
+
           // 过滤掉占位消息
           const filtered = prev.filter(item => {
             if (item.type === 'message' && item.role === 'assistant') {
@@ -58,17 +82,31 @@ export default function Home() {
             }
             return true;
           });
+
+          const newItems: AgentInputItem[] = [...filtered];
           
-          return [
-            ...filtered,
-            {
-              type: 'function_call',
-              name: event.data.name,
-              arguments: event.data.arguments,
-              callId: event.data.callId,
-              id: event.data.callId,
-            } as unknown as AgentInputItem
-          ];
+          // 如果有累积的 reasoning，先作为独立 item 插入（在 tool call 之前）
+          if (currentReasoningRef.current) {
+            newItems.push({
+              type: 'reasoning_item',
+              content: currentReasoningRef.current,
+              id: `reasoning-${Date.now()}`,
+            } as unknown as AgentInputItem);
+            // 清空当前 reasoning
+            currentReasoningRef.current = '';
+            setStreamingReasoning('');
+          }
+          
+          // 添加 tool call
+          newItems.push({
+            type: 'function_call',
+            name: event.data.name,
+            arguments: event.data.arguments,
+            callId: event.data.callId,
+            id: event.data.callId,
+          } as unknown as AgentInputItem);
+          
+          return newItems;
         });
         break;
 
@@ -90,33 +128,90 @@ export default function Home() {
       case 'message':
         // 添加消息到历史
         setStreamingText('');
+        setStreamingReasoning('');
         break;
 
       case 'agent_update':
         // 可以用来显示当前活动的 agent
-        console.log('Agent update:', event.data.agent);
         break;
 
       case 'interruption':
-        // 需要审批
-        setHistory(event.data.history);
+        // 需要审批 - 同样需要保留 reasoning
+        const interruptionHistoryWithReasoning = [...event.data.history];
+        
+        // 先将当前 reasoning 保存到 map
+        if (currentReasoningRef.current) {
+          for (let i = interruptionHistoryWithReasoning.length - 1; i >= 0; i--) {
+            const item = interruptionHistoryWithReasoning[i];
+            if (item.type === 'message' && item.role === 'assistant') {
+              const msgId = item.id || `msg-${i}`;
+              reasoningMapRef.current.set(msgId, currentReasoningRef.current);
+              break;
+            }
+          }
+        }
+        
+        // 恢复所有历史消息的 reasoning
+        for (let i = 0; i < interruptionHistoryWithReasoning.length; i++) {
+          const item = interruptionHistoryWithReasoning[i];
+          if (item.type === 'message' && item.role === 'assistant') {
+            const msgId = item.id || `msg-${i}`;
+            const savedReasoning = reasoningMapRef.current.get(msgId);
+            if (savedReasoning) {
+              (item as any).reasoning = savedReasoning;
+            }
+          }
+        }
+        
+        setHistory(interruptionHistoryWithReasoning);
         setApprovals(event.data.approvals);
         setIsStreaming(false);
         setStreamingText('');
+        setStreamingReasoning('');
+        currentReasoningRef.current = '';
         break;
 
       case 'done':
-        // 完成
-        setHistory(event.data.history);
+        // 完成 - 将 reasoning 附加到消息并保留历史 reasoning
+        const historyWithReasoning = [...event.data.history];
+        
+        // 先将当前 reasoning 保存到 map（找到最后一条 assistant 消息）
+        if (currentReasoningRef.current) {
+          for (let i = historyWithReasoning.length - 1; i >= 0; i--) {
+            const item = historyWithReasoning[i];
+            if (item.type === 'message' && item.role === 'assistant') {
+              const msgId = item.id || `msg-${i}`;
+              reasoningMapRef.current.set(msgId, currentReasoningRef.current);
+              break;
+            }
+          }
+        }
+        
+        // 恢复所有历史消息的 reasoning
+        for (let i = 0; i < historyWithReasoning.length; i++) {
+          const item = historyWithReasoning[i];
+          if (item.type === 'message' && item.role === 'assistant') {
+            const msgId = item.id || `msg-${i}`;
+            const savedReasoning = reasoningMapRef.current.get(msgId);
+            if (savedReasoning) {
+              (item as any).reasoning = savedReasoning;
+            }
+          }
+        }
+        
+        setHistory(historyWithReasoning);
         setApprovals([]);
         setIsStreaming(false);
         setStreamingText('');
+        setStreamingReasoning('');
+        currentReasoningRef.current = '';
         break;
 
       case 'error':
         console.error('Stream error:', event.data.error);
         setIsStreaming(false);
         setStreamingText('');
+        setStreamingReasoning('');
         break;
     }
   }, []);
@@ -137,6 +232,8 @@ export default function Home() {
 
     setIsStreaming(true);
     setStreamingText('');
+    setStreamingReasoning('');
+    currentReasoningRef.current = '';
     pendingToolCalls.current.clear();
 
     try {
@@ -168,7 +265,7 @@ export default function Home() {
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
-        
+
         // 解析 SSE 事件
         const lines = buffer.split('\n');
         buffer = lines.pop() || ''; // 保留不完整的行
@@ -202,6 +299,7 @@ export default function Home() {
   }
 
   const handleSend = async (message: string) => {
+    setStreamingReasoning('');
     await makeStreamingRequest({ message });
   };
 
@@ -220,7 +318,7 @@ export default function Home() {
       status: 'in_progress',
     } as unknown as AgentInputItem);
   } else if (isStreaming && !streamingText && pendingToolCalls.current.size === 0) {
-    // 正在等待但还没有内容
+    // 正在等待但还没有内容（可能正在思考）
     displayHistory.push({
       type: 'message',
       role: 'assistant',
@@ -231,10 +329,11 @@ export default function Home() {
 
   return (
     <>
-      <App 
-        history={displayHistory} 
-        onSend={handleSend} 
+      <App
+        history={displayHistory}
+        onSend={handleSend}
         isStreaming={isStreaming}
+        currentReasoning={streamingReasoning}
       />
       <Approvals approvals={approvals} onDone={handleDone} />
     </>

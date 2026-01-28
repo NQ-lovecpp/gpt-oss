@@ -2,16 +2,14 @@
 
 import type { AgentInputItem } from '@openai/agents';
 import { TextMessage } from './messages/TextMessage';
-import {
-  FunctionCallMessage,
-  ProcessedFunctionCallItem,
-} from './messages/FunctionCall';
-import { useMemo, useRef, useEffect } from 'react';
-import { FunctionCallSkeleton } from '@/components/ui/LoadingEffects';
+import { ThinkingBlock, ThinkingBlockItem, ToolCallItem } from './messages/ThinkingBlock';
+import { useMemo, useRef, useEffect, useState, useCallback } from 'react';
+import { ChevronDown } from 'lucide-react';
 
 export type HistoryProps = {
   history: AgentInputItem[];
   isLoading?: boolean;
+  currentReasoning?: string;
 };
 
 export type ProcessedMessageItem = {
@@ -19,14 +17,50 @@ export type ProcessedMessageItem = {
   role: 'user' | 'assistant';
   content: string;
   id: string;
+  status?: 'in_progress' | 'completed';
+  reasoning?: string;
 };
 
-type ProcessedItem = ProcessedMessageItem | ProcessedFunctionCallItem;
+type ProcessedToolCallItem = {
+  type: 'function_call';
+  name: string;
+  arguments: string;
+  id: string;
+  callId: string;
+  output?: string;
+  status: 'completed' | 'in_progress';
+};
+
+type ProcessedReasoningItemType = {
+  type: 'reasoning_item';
+  content: string;
+  id: string;
+};
+
+type ProcessedItem = ProcessedMessageItem | ProcessedToolCallItem | ProcessedReasoningItemType;
+
+// Group items for display: user message -> thinking block -> assistant response
+type DisplayGroup = {
+  userMessage?: ProcessedMessageItem;
+  thinkingItems: ThinkingBlockItem[];
+  assistantMessage?: ProcessedMessageItem;
+  isStreaming: boolean;
+};
 
 function processItems(items: AgentInputItem[]): ProcessedItem[] {
   const processedItems: ProcessedItem[] = [];
 
   for (const item of items) {
+    // 处理独立的 reasoning_item
+    if ((item as any).type === 'reasoning_item') {
+      processedItems.push({
+        type: 'reasoning_item',
+        content: (item as any).content,
+        id: (item as any).id ?? `reasoning-${processedItems.length}`,
+      });
+      continue;
+    }
+
     if (item.type === 'function_call') {
       processedItems.push({
         type: 'function_call',
@@ -46,12 +80,10 @@ function processItems(items: AgentInputItem[]): ProcessedItem[] {
       if (index !== -1 && processedItems[index].type === 'function_call') {
         const outputValue = item.output;
 
-        // Handle various output formats from different tools (including MCP)
         let extractedOutput = '';
         if (typeof outputValue === 'string') {
           extractedOutput = outputValue;
         } else if (Array.isArray(outputValue)) {
-          // MCP tools often return an array of content items
           extractedOutput = outputValue
             .map((content: any) => {
               if (typeof content === 'string') return content;
@@ -69,13 +101,12 @@ function processItems(items: AgentInputItem[]): ProcessedItem[] {
           } else if ('text' in outputValue) {
             extractedOutput = (outputValue as { text: string }).text;
           } else {
-            // Fallback: stringify the object
             extractedOutput = JSON.stringify(outputValue);
           }
         }
 
-        processedItems[index].output = extractedOutput;
-        processedItems[index].status = 'completed';
+        (processedItems[index] as ProcessedToolCallItem).output = extractedOutput;
+        (processedItems[index] as ProcessedToolCallItem).status = 'completed';
       }
     }
 
@@ -87,23 +118,25 @@ function processItems(items: AgentInputItem[]): ProcessedItem[] {
           typeof item.content === 'string'
             ? item.content
             : item.content
-                .map((content) => {
-                  if (
-                    content.type === 'input_text' ||
-                    content.type === 'output_text'
-                  ) {
-                    return content.text;
-                  }
-                  if (content.type === 'audio') {
-                    return content.transcript ?? '⚫︎⚫︎⚫︎';
-                  }
-                  if (content.type === 'refusal') {
-                    return content.refusal;
-                  }
-                  return '';
-                })
-                .join('\n') || '⚫︎⚫︎⚫︎',
+              .map((content) => {
+                if (
+                  content.type === 'input_text' ||
+                  content.type === 'output_text'
+                ) {
+                  return content.text;
+                }
+                if (content.type === 'audio') {
+                  return content.transcript ?? '';
+                }
+                if (content.type === 'refusal') {
+                  return content.refusal;
+                }
+                return '';
+              })
+              .join('\n') || '',
         id: item.id ?? '',
+        status: (item as any).status,
+        reasoning: (item as any).reasoning,
       });
     }
   }
@@ -111,50 +144,213 @@ function processItems(items: AgentInputItem[]): ProcessedItem[] {
   return processedItems;
 }
 
-export function History({ history, isLoading = false }: HistoryProps) {
+function groupItemsForDisplay(items: ProcessedItem[], currentReasoning?: string): DisplayGroup[] {
+  const groups: DisplayGroup[] = [];
+  let currentGroup: DisplayGroup | null = null;
+
+  for (const item of items) {
+    if (item.type === 'message' && item.role === 'user') {
+      // Start a new group with user message
+      if (currentGroup) {
+        groups.push(currentGroup);
+      }
+      currentGroup = {
+        userMessage: item,
+        thinkingItems: [],
+        isStreaming: false,
+      };
+    } else if (item.type === 'reasoning_item') {
+      // Add reasoning to current group (in order)
+      if (!currentGroup) {
+        currentGroup = { thinkingItems: [], isStreaming: false };
+      }
+      currentGroup.thinkingItems.push({
+        type: 'reasoning',
+        content: item.content,
+        id: item.id,
+      });
+    } else if (item.type === 'function_call') {
+      // Add tool call to current group
+      if (!currentGroup) {
+        currentGroup = { thinkingItems: [], isStreaming: false };
+      }
+      currentGroup.thinkingItems.push({
+        type: 'tool_call',
+        name: item.name,
+        arguments: item.arguments,
+        id: item.id,
+        callId: item.callId,
+        output: item.output,
+        status: item.status,
+      } as ToolCallItem);
+    } else if (item.type === 'message' && item.role === 'assistant') {
+      // Set assistant message for current group
+      if (!currentGroup) {
+        currentGroup = { thinkingItems: [], isStreaming: false };
+      }
+      
+      // Add reasoning from message to thinking items if present
+      // 这是最后的 reasoning（在所有 tool calls 之后），应该添加到末尾
+      if (item.reasoning) {
+        // 检查是否已经有相同内容的 reasoning（避免重复）
+        const existingReasoningContent = currentGroup.thinkingItems
+          .filter(i => i.type === 'reasoning')
+          .map(i => i.content)
+          .join('\n');
+        
+        // 如果没有 reasoning，或者 final reasoning 有新内容
+        if (!existingReasoningContent) {
+          currentGroup.thinkingItems.push({
+            type: 'reasoning',
+            content: item.reasoning,
+            id: `reasoning-${item.id}`,
+          });
+        } else if (!existingReasoningContent.includes(item.reasoning) && !item.reasoning.includes(existingReasoningContent)) {
+          // final reasoning 有新内容，添加到末尾
+          currentGroup.thinkingItems.push({
+            type: 'reasoning',
+            content: item.reasoning,
+            id: `reasoning-final-${item.id}`,
+          });
+        }
+      }
+      
+      currentGroup.assistantMessage = item;
+      currentGroup.isStreaming = item.status === 'in_progress';
+      
+      // If there's content, push the group
+      if (item.content || currentGroup.thinkingItems.length > 0) {
+        groups.push(currentGroup);
+        currentGroup = null;
+      }
+    }
+  }
+
+  // Handle remaining group
+  if (currentGroup) {
+    groups.push(currentGroup);
+  }
+
+  return groups;
+}
+
+export function History({ history, isLoading = false, currentReasoning = '' }: HistoryProps) {
   const processedItems = useMemo(() => processItems(history), [history]);
+  const displayGroups = useMemo(
+    () => groupItemsForDisplay(processedItems, currentReasoning),
+    [processedItems, currentReasoning]
+  );
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const [isAtBottom, setIsAtBottom] = useState(true);
+  const [showScrollButton, setShowScrollButton] = useState(false);
 
-  // 自动滚动到底部
+  // 检查是否在底部
+  const checkIfAtBottom = useCallback(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return true;
+    const threshold = 100; // 100px 容差
+    return container.scrollHeight - container.scrollTop - container.clientHeight < threshold;
+  }, []);
+
+  // 滚动事件处理
   useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+
+    const handleScroll = () => {
+      const atBottom = checkIfAtBottom();
+      setIsAtBottom(atBottom);
+      // 只有在生成时且不在底部时显示按钮
+      setShowScrollButton(!atBottom && isLoading);
+    };
+
+    container.addEventListener('scroll', handleScroll);
+    return () => container.removeEventListener('scroll', handleScroll);
+  }, [checkIfAtBottom, isLoading]);
+
+  // 当 isLoading 状态变化时更新按钮显示
+  useEffect(() => {
+    if (!isLoading) {
+      setShowScrollButton(false);
+    } else if (!isAtBottom) {
+      setShowScrollButton(true);
+    }
+  }, [isLoading, isAtBottom]);
+
+  // Auto-scroll to bottom - 只有在用户已经在底部时才自动滚动
+  useEffect(() => {
+    if (isAtBottom) {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [displayGroups, isLoading, currentReasoning, isAtBottom]);
+
+  // 手动滚动到底部
+  const scrollToBottom = useCallback(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [processedItems, isLoading]);
+    setIsAtBottom(true);
+    setShowScrollButton(false);
+  }, []);
 
   return (
     <div
       ref={scrollContainerRef}
-      className="h-full overflow-y-auto overscroll-contain scrollbar-thin"
+      className="h-full overflow-y-auto overscroll-contain scrollbar-thin relative"
     >
-      <div className="p-4 space-y-4 min-h-full" id="chatHistory">
-        {processedItems.map((item, idx) => {
-          if (item.type === 'function_call') {
-            return <FunctionCallMessage message={item} key={item.id ?? idx} />;
-          }
-
-          if (item.type === 'message') {
-            return (
+      <div className="p-4 space-y-2 min-h-full" id="chatHistory">
+        {displayGroups.map((group, groupIdx) => (
+          <div key={groupIdx} className="space-y-2">
+            {/* User message */}
+            {group.userMessage && (
               <TextMessage
-                text={item.content}
-                isUser={item.role === 'user'}
-                key={item.id || idx}
+                text={group.userMessage.content}
+                isUser={true}
               />
-            );
-          }
+            )}
 
-          return null;
-        })}
+            {/* Thinking block (reasoning + tool calls) */}
+            {(group.thinkingItems.length > 0 || (group.isStreaming && currentReasoning)) && (
+              <ThinkingBlock
+                items={group.thinkingItems}
+                isStreaming={group.isStreaming}
+                currentReasoning={group.isStreaming ? currentReasoning : ''}
+              />
+            )}
 
-        {/* 加载中骨架屏 */}
-        {isLoading && (
-          <div className="space-y-4 pt-2">
-            <FunctionCallSkeleton />
+            {/* Assistant message */}
+            {group.assistantMessage && group.assistantMessage.content && (
+              <TextMessage
+                text={group.assistantMessage.content}
+                isUser={false}
+              />
+            )}
+          </div>
+        ))}
+
+        {/* Loading state */}
+        {isLoading && displayGroups.length === 0 && (
+          <div className="flex items-center justify-center py-8">
+            <div className="flex items-center gap-2 text-zinc-400">
+              <div className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-pulse" />
+              <span className="text-sm">Starting...</span>
+            </div>
           </div>
         )}
 
-        {/* 滚动锚点 */}
+        {/* Scroll anchor */}
         <div ref={bottomRef} className="h-1" />
       </div>
+
+      {/* Scroll to bottom button */}
+      {showScrollButton && (
+        <button
+          onClick={scrollToBottom}
+          className="fixed bottom-24 right-8 z-50 flex items-center gap-1.5 px-3 py-2 bg-white border border-zinc-200 rounded-full shadow-lg hover:bg-zinc-50 transition-all text-sm text-zinc-600"
+        >
+          <ChevronDown size={16} />
+          <span>回到底部</span>
+        </button>
+      )}
     </div>
   );
 }

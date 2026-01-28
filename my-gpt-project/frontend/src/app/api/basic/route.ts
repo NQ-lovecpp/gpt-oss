@@ -40,7 +40,7 @@ export async function POST(req: NextRequest) {
     // 如果请求流式输出
     if (useStream) {
       const encoder = new TextEncoder();
-      
+
       const readable = new ReadableStream({
         async start(controller) {
           try {
@@ -48,7 +48,7 @@ export async function POST(req: NextRequest) {
             controller.enqueue(encoder.encode(encodeSSE('init', { conversationId })));
 
             let input: AgentInputItem[] | RunState<any, any>;
-            
+
             if (Object.keys(decisions || {}).length > 0 && data.conversationId) {
               const stateString = await db().get(data.conversationId);
               if (!stateString) {
@@ -74,24 +74,58 @@ export async function POST(req: NextRequest) {
             }
 
             // 使用流式运行
-            const stream = await runner.run(agent, input, { 
+            const stream = await runner.run(agent, input, {
               stream: true,
             });
 
             // 处理流事件
             for await (const event of stream) {
               if (event.type === 'raw_model_stream_event') {
-                // 发送原始模型事件（用于打字机效果）
                 const eventData = event.data as any;
-                if (eventData?.type === 'response.output_text.delta' || eventData?.type === 'output_text_delta') {
-                  controller.enqueue(encoder.encode(encodeSSE('text_delta', { 
-                    delta: eventData.delta 
+                
+                // 处理 model 类型的事件（来自 OpenAI Responses API）
+                if (eventData?.type === 'model' && eventData?.event) {
+                  const modelEvent = eventData.event;
+                  // 处理 reasoning text delta（思维链增量）
+                  if (modelEvent.type === 'response.reasoning_text.delta' || 
+                      modelEvent.type === 'response.reasoning_summary_text.delta') {
+                    controller.enqueue(encoder.encode(encodeSSE('reasoning_delta', {
+                      delta: modelEvent.delta || ''
+                    })));
+                  }
+                }
+                
+                // 处理 output_text_delta 类型（最终输出文本）
+                if (eventData?.type === 'output_text_delta') {
+                  controller.enqueue(encoder.encode(encodeSSE('text_delta', {
+                    delta: typeof eventData.delta === 'string' ? eventData.delta : (eventData.delta as any)?.text || ''
+                  })));
+                }
+                
+                // 兼容旧的事件格式
+                if (eventData?.type === 'response.output_text.delta') {
+                  controller.enqueue(encoder.encode(encodeSSE('text_delta', {
+                    delta: eventData.delta || ''
                   })));
                 }
               } else if (event.type === 'run_item_stream_event') {
-                // 发送运行项目事件
                 const item = event.item as any;
-                if (item.type === 'tool_call_item') {
+                
+                if (item.type === 'reasoning_item') {
+                  // 处理 reasoning_item，提取 reasoning 内容
+                  const rawItem = item.rawItem;
+                  if (rawItem && rawItem.content) {
+                    const reasoningText = rawItem.content
+                      .filter((c: any) => c.type === 'input_text' || c.type === 'summary_text')
+                      .map((c: any) => c.text)
+                      .join('\n');
+                    if (reasoningText) {
+                      controller.enqueue(encoder.encode(encodeSSE('reasoning_item', {
+                        text: reasoningText
+                      })));
+                    }
+                  }
+                } else if (item.type === 'tool_call_item') {
                   controller.enqueue(encoder.encode(encodeSSE('tool_call', {
                     name: item.rawItem.name,
                     arguments: item.rawItem.arguments,
@@ -140,8 +174,8 @@ export async function POST(req: NextRequest) {
             controller.close();
           } catch (error) {
             console.error('Stream error:', error);
-            controller.enqueue(encoder.encode(encodeSSE('error', { 
-              error: error instanceof Error ? error.message : 'Unknown error' 
+            controller.enqueue(encoder.encode(encodeSSE('error', {
+              error: error instanceof Error ? error.message : 'Unknown error'
             })));
             controller.close();
           }

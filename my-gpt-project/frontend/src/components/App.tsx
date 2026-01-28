@@ -13,9 +13,10 @@ export type AppProps = {
   history?: AgentInputItem[];
   onSend: (message: string) => void;
   isStreaming?: boolean;
+  currentReasoning?: string;
 };
 
-export function App({ title = 'Agent Demo', history, onSend, isStreaming = false }: AppProps) {
+export function App({ title = 'Agent Demo', history, onSend, isStreaming = false, currentReasoning = '' }: AppProps) {
   const [message, setMessage] = useState('');
   const [isSending, setIsSending] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -69,7 +70,7 @@ export function App({ title = 'Agent Demo', history, onSend, isStreaming = false
           {/* 聊天历史 - 可滚动区域 */}
           <div className="flex-1 min-h-0 rounded-2xl border border-zinc-100 shadow-sm bg-white overflow-hidden">
             {hasHistory ? (
-              <History history={history} isLoading={isLoading} />
+              <History history={history} isLoading={isLoading} currentReasoning={currentReasoning} />
             ) : (
               <div className="h-full flex flex-col items-center justify-center text-center p-8">
                 <motion.div
