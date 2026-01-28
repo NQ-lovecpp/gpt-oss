@@ -35,6 +35,8 @@ export default function Home() {
   const currentReasoningRef = useRef<string>('');
   // 用于存储历史消息的 reasoning（按消息 id 或索引）
   const reasoningMapRef = useRef<Map<string, string>>(new Map());
+  // 用于追踪 reasoning 是否已保存到 history（避免重复显示）
+  const reasoningSavedRef = useRef<boolean>(false);
 
   const processStreamEvent = useCallback((event: StreamEvent) => {
     switch (event.type) {
@@ -48,11 +50,18 @@ export default function Home() {
         break;
 
       case 'reasoning_delta':
-        setStreamingReasoning(prev => {
-          const newValue = prev + event.data.delta;
-          currentReasoningRef.current = newValue;
-          return newValue;
-        });
+        // 如果之前的 reasoning 已保存到 history，开始新的 reasoning
+        if (reasoningSavedRef.current) {
+          reasoningSavedRef.current = false;
+          setStreamingReasoning(event.data.delta);
+          currentReasoningRef.current = event.data.delta;
+        } else {
+          setStreamingReasoning(prev => {
+            const newValue = prev + event.data.delta;
+            currentReasoningRef.current = newValue;
+            return newValue;
+          });
+        }
         break;
 
       case 'reasoning_item':
@@ -67,6 +76,10 @@ export default function Home() {
       case 'tool_call':
         // 添加工具调用到历史
         pendingToolCalls.current.set(event.data.callId, event.data);
+        
+        // 先保存当前的 reasoning 到 ref（在 setHistory 之前）
+        const reasoningToSave = currentReasoningRef.current;
+        
         setHistory(prev => {
           // 检查是否已经存在这个工具调用
           const existing = prev.find(
@@ -86,15 +99,12 @@ export default function Home() {
           const newItems: AgentInputItem[] = [...filtered];
           
           // 如果有累积的 reasoning，先作为独立 item 插入（在 tool call 之前）
-          if (currentReasoningRef.current) {
+          if (reasoningToSave) {
             newItems.push({
               type: 'reasoning_item',
-              content: currentReasoningRef.current,
+              content: reasoningToSave,
               id: `reasoning-${Date.now()}`,
             } as unknown as AgentInputItem);
-            // 清空当前 reasoning
-            currentReasoningRef.current = '';
-            setStreamingReasoning('');
           }
           
           // 添加 tool call
@@ -108,6 +118,13 @@ export default function Home() {
           
           return newItems;
         });
+        
+        // reasoning 已保存到 history，清空当前显示
+        if (reasoningToSave) {
+          reasoningSavedRef.current = true;
+          currentReasoningRef.current = '';
+          setStreamingReasoning('');
+        }
         break;
 
       case 'tool_output':
@@ -234,6 +251,7 @@ export default function Home() {
     setStreamingText('');
     setStreamingReasoning('');
     currentReasoningRef.current = '';
+    reasoningSavedRef.current = false;
     pendingToolCalls.current.clear();
 
     try {
