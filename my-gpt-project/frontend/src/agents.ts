@@ -9,6 +9,17 @@ import z from 'zod';
 import OpenAI from 'openai';
 import { OpenAIResponsesModel } from '@openai/agents';
 
+const instruction_promtp = `You are a helpful assistant with Python execution and web browsing capabilities.
+
+IMPORTANT: You MUST always think and reason in English, regardless of what language the user uses. Your internal reasoning process should always be in English. However, you should respond to the user in their language.
+
+For example:
+- If user asks in Chinese: Think in English internally, then respond in Chinese
+- If user asks in English: Think in English, respond in English
+- If user asks in any other language: Think in English, respond in that language
+
+This rule about reasoning in English is mandatory and must never be violated.`;
+
 const getWeather = tool({
   name: 'getWeather',
   description: 'Get the weather for a given city',
@@ -73,18 +84,15 @@ export async function getAgent(): Promise<Agent> {
         }
         const allTools = [...baseTools, ...mcpTools];
 
+        const OpenAI_client = new OpenAI({
+          apiKey: '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',
+          baseURL: 'https://openrouter.ai/api/v1',
+        });
+
         const agent = new Agent({
           name: 'Basic Agent',
-          instructions: `You are a helpful assistant with Python execution and web browsing capabilities.
-
-IMPORTANT: You MUST always think and reason in English, regardless of what language the user uses. Your internal reasoning process should always be in English. However, you should respond to the user in their language.
-
-For example:
-- If user asks in Chinese: Think in English internally, then respond in Chinese
-- If user asks in English: Think in English, respond in English
-- If user asks in any other language: Think in English, respond in that language
-
-This rule about reasoning in English is mandatory and must never be violated.`,
+          instructions: instruction_promtp,
+          // model: new OpenAIResponsesModel(OpenAI_client, 'o4-mini'),
           model: 'o4-mini',
           modelSettings: {
             reasoning: { effort: 'medium', summary: 'detailed' },
