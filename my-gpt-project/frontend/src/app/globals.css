@@ -118,5 +118,101 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-feature-settings: 'rlig' 1, 'calt' 1;
   }
+}
+
+/* 自定义滚动条样式 */
+@layer utilities {
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(212 212 216) transparent;
+  }
+  
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: rgb(212 212 216);
+    border-radius: 3px;
+  }
+  
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    background-color: rgb(161 161 170);
+  }
+}
+
+/* Prose 样式调整 */
+.prose {
+  --tw-prose-body: rgb(63 63 70);
+  --tw-prose-headings: rgb(24 24 27);
+  --tw-prose-links: rgb(37 99 235);
+  --tw-prose-bold: rgb(24 24 27);
+  --tw-prose-counters: rgb(113 113 122);
+  --tw-prose-bullets: rgb(161 161 170);
+  --tw-prose-hr: rgb(228 228 231);
+  --tw-prose-quotes: rgb(63 63 70);
+  --tw-prose-quote-borders: rgb(228 228 231);
+  --tw-prose-captions: rgb(113 113 122);
+  --tw-prose-code: rgb(24 24 27);
+  --tw-prose-pre-code: rgb(228 228 231);
+  --tw-prose-pre-bg: rgb(39 39 42);
+  --tw-prose-th-borders: rgb(212 212 216);
+  --tw-prose-td-borders: rgb(228 228 231);
+}
+
+/* 自定义动画 */
+@keyframes shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes pulse-soft {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+@keyframes bounce-subtle {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+.animate-shimmer {
+  animation: shimmer 2s infinite;
+}
+
+.animate-pulse-soft {
+  animation: pulse-soft 2s ease-in-out infinite;
+}
+
+.animate-bounce-subtle {
+  animation: bounce-subtle 1s ease-in-out infinite;
+}
+
+/* 行号样式 */
+.line-number {
+  display: inline-block;
+  min-width: 2.5em;
+  padding-right: 1em;
+  text-align: right;
+  color: rgb(161 161 170);
+  user-select: none;
 }

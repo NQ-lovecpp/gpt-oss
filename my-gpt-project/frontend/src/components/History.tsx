@@ -1,13 +1,17 @@
+'use client';
+
 import type { AgentInputItem } from '@openai/agents';
 import { TextMessage } from './messages/TextMessage';
 import {
   FunctionCallMessage,
   ProcessedFunctionCallItem,
 } from './messages/FunctionCall';
-import { useMemo } from 'react';
+import { useMemo, useRef, useEffect } from 'react';
+import { FunctionCallSkeleton } from '@/components/ui/LoadingEffects';
 
 export type HistoryProps = {
   history: AgentInputItem[];
+  isLoading?: boolean;
 };
 
 export type ProcessedMessageItem = {
@@ -107,31 +111,50 @@ function processItems(items: AgentInputItem[]): ProcessedItem[] {
   return processedItems;
 }
 
-export function History({ history }: HistoryProps) {
+export function History({ history, isLoading = false }: HistoryProps) {
   const processedItems = useMemo(() => processItems(history), [history]);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  // 自动滚动到底部
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [processedItems, isLoading]);
 
   return (
     <div
-      className="overflow-y-scroll pl-4 flex-1 rounded-lg bg-white space-y-4"
-      id="chatHistory"
+      ref={scrollContainerRef}
+      className="h-full overflow-y-auto overscroll-contain scrollbar-thin"
     >
-      {processedItems.map((item, idx) => {
-        if (item.type === 'function_call') {
-          return <FunctionCallMessage message={item} key={item.id ?? idx} />;
-        }
+      <div className="p-4 space-y-4 min-h-full" id="chatHistory">
+        {processedItems.map((item, idx) => {
+          if (item.type === 'function_call') {
+            return <FunctionCallMessage message={item} key={item.id ?? idx} />;
+          }
 
-        if (item.type === 'message') {
-          return (
-            <TextMessage
-              text={item.content}
-              isUser={item.role === 'user'}
-              key={item.id || idx}
-            />
-          );
-        }
+          if (item.type === 'message') {
+            return (
+              <TextMessage
+                text={item.content}
+                isUser={item.role === 'user'}
+                key={item.id || idx}
+              />
+            );
+          }
 
-        return null;
-      })}
+          return null;
+        })}
+
+        {/* 加载中骨架屏 */}
+        {isLoading && (
+          <div className="space-y-4 pt-2">
+            <FunctionCallSkeleton />
+          </div>
+        )}
+
+        {/* 滚动锚点 */}
+        <div ref={bottomRef} className="h-1" />
+      </div>
     </div>
   );
 }
