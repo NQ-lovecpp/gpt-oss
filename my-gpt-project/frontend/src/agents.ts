@@ -1,6 +1,7 @@
 import {
   Agent,
   MCPServerSSE,
+  OpenAIChatCompletionsModel,
   connectMcpServers,
   getAllMcpTools,
   tool,
@@ -20,18 +21,18 @@ For example:
 
 This rule about reasoning in English is mandatory and must never be violated.`;
 
-const getWeather = tool({
+const getWeather = tool<any>({
   name: 'getWeather',
   description: 'Get the weather for a given city',
   parameters: z.object({
     city: z.string(),
   }),
-  execute: async ({ city }) => {
+  execute: async ({ city }: any) => {
     return `The weather in ${city} is sunny.`;
   },
 
   needsApproval: true,
-});
+}) as any;
 
 // Python execution MCP server (SSE 模式，连接已运行的服务器)
 const pythonServer = new MCPServerSSE({
@@ -74,7 +75,7 @@ export async function getAgent(): Promise<Agent> {
 
         // 拉取 MCP 工具并与本地工具合并
         const baseTools = [getWeather];
-        let mcpTools = [];
+        let mcpTools: any[] = [];
         try {
           mcpTools = mcpServers.active.length
             ? await getAllMcpTools(mcpServers.active)
@@ -84,23 +85,45 @@ export async function getAgent(): Promise<Agent> {
         }
         const allTools = [...baseTools, ...mcpTools];
 
-        const OpenAI_client = new OpenAI({
-          apiKey: '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',
-          baseURL: 'https://openrouter.ai/api/v1',
+        // const OpenAI_client = new (OpenAI as any)({
+        //   apiKey: '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',
+        //   baseURL: 'https://openrouter.ai/api/v1',
+        // });
+
+        const OpenAI_client = new (OpenAI as any)({
+          apiKey: 'local',
+          baseURL: 'http://localhost:8080/v1', // llama.cpp
         });
 
         const agent = new Agent({
           name: 'Basic Agent',
           instructions: instruction_promtp,
-          // model: new OpenAIResponsesModel(OpenAI_client, 'o4-mini'),
-          model: 'o4-mini',
+          model: new OpenAIResponsesModel(OpenAI_client, 'ggml-org/gpt-oss-20b-GGUF'),
+          // model: 'o4-mini',
           modelSettings: {
-            reasoning: { effort: 'medium', summary: 'detailed' },
-            text: { verbosity: 'medium' },
+            providerData: {
+              reasoning: {
+                effort: 'medium'
+              },
+            }
           },
           tools: allTools,
           mcpServers: mcpServers.active,
         });
+
+        // openrouter or openai
+        // const agent = new Agent({
+        //   name: 'Basic Agent',
+        //   instructions: instruction_promtp,
+        //   model: new OpenAIResponsesModel(OpenAI_client, 'openai/gpt-oss-120b'),
+        //   // model: 'o4-mini',
+        //   modelSettings: {
+        //     reasoning: { effort: 'medium', summary: 'detailed' },
+        //     text: { verbosity: 'medium' },
+        //   },
+        //   tools: allTools,
+        //   mcpServers: mcpServers.active,
+        // });
 
         console.log(`[Agent] Initialized with ${allTools.length} tools`);
         return agent;

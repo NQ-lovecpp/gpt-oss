@@ -1,7 +1,7 @@
 'use client';
 
 import type { AgentInputItem, RunToolApprovalItem } from '@openai/agents';
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { App } from '@/components/App';
 import { Approvals } from '@/components/Approvals';
 
@@ -37,6 +37,11 @@ export default function Home() {
   const reasoningMapRef = useRef<Map<string, string>>(new Map());
   // 用于追踪 reasoning 是否已保存到 history（避免重复显示）
   const reasoningSavedRef = useRef<boolean>(false);
+
+  // 页面加载时预热 Agent 与 MCP 连接，避免首条消息触发 "Received request before initialization was complete"
+  useEffect(() => {
+    fetch('/api/agent/init').catch(() => {});
+  }, []);
 
   const processStreamEvent = useCallback((event: StreamEvent) => {
     switch (event.type) {
