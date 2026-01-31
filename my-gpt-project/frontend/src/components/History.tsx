@@ -62,12 +62,14 @@ function processItems(items: AgentInputItem[]): ProcessedItem[] {
     }
 
     if (item.type === 'function_call') {
+      // 确保 id 和 callId 都有有效值
+      const callId = item.callId ?? `call-${processedItems.length}-${Date.now()}`;
       processedItems.push({
         type: 'function_call',
         name: item.name,
         arguments: item.arguments,
-        id: item.id ?? '',
-        callId: item.callId ?? '',
+        id: item.id || callId,
+        callId: callId,
         status: 'in_progress',
       });
     }
@@ -164,22 +166,26 @@ function groupItemsForDisplay(items: ProcessedItem[], currentReasoning?: string)
       if (!currentGroup) {
         currentGroup = { thinkingItems: [], isStreaming: false };
       }
+      // 确保 id 唯一
+      const reasoningId = item.id || `reasoning-${currentGroup.thinkingItems.length}-${Date.now()}`;
       currentGroup.thinkingItems.push({
         type: 'reasoning',
         content: item.content,
-        id: item.id,
+        id: reasoningId,
       });
     } else if (item.type === 'function_call') {
       // Add tool call to current group
       if (!currentGroup) {
         currentGroup = { thinkingItems: [], isStreaming: false };
       }
+      // 确保有有效的 id
+      const toolId = item.id || item.callId || `tool-${currentGroup.thinkingItems.length}-${Date.now()}`;
       currentGroup.thinkingItems.push({
         type: 'tool_call',
         name: item.name,
         arguments: item.arguments,
-        id: item.id,
-        callId: item.callId,
+        id: toolId,
+        callId: item.callId || toolId,
         output: item.output,
         status: item.status,
       } as ToolCallItem);
@@ -198,19 +204,22 @@ function groupItemsForDisplay(items: ProcessedItem[], currentReasoning?: string)
           .map(i => i.content)
           .join('\n');
         
+        // 生成唯一 id
+        const msgId = item.id || `msg-${groups.length}`;
+        
         // 如果没有 reasoning，或者 final reasoning 有新内容
         if (!existingReasoningContent) {
           currentGroup.thinkingItems.push({
             type: 'reasoning',
             content: item.reasoning,
-            id: `reasoning-${item.id}`,
+            id: `reasoning-msg-${msgId}-${Date.now()}`,
           });
         } else if (!existingReasoningContent.includes(item.reasoning) && !item.reasoning.includes(existingReasoningContent)) {
           // final reasoning 有新内容，添加到末尾
           currentGroup.thinkingItems.push({
             type: 'reasoning',
             content: item.reasoning,
-            id: `reasoning-final-${item.id}`,
+            id: `reasoning-final-${msgId}-${Date.now()}`,
           });
         }
       }

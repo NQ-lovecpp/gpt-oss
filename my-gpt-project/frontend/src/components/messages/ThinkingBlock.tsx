@@ -122,13 +122,12 @@ function getToolSummary(toolName: string, args: string): string {
 }
 
 // 解析 reasoning 文本，按 **标题** 分段
-function parseReasoningSections(text: string): ReasoningSection[] {
+function parseReasoningSections(text: string, idPrefix: string = ''): ReasoningSection[] {
   if (!text) return [];
   
   const sections: ReasoningSection[] = [];
   // 匹配 **标题** 模式，支持换行或文本开头
   const regex = /\*\*([^*]+)\*\*/g;
-  let lastIndex = 0;
   let match;
   let sectionIndex = 0;
   
@@ -142,12 +141,15 @@ function parseReasoningSections(text: string): ReasoningSection[] {
     });
   }
   
+  // 生成唯一前缀
+  const prefix = idPrefix || `s-${text.slice(0, 20).replace(/\W/g, '')}-`;
+  
   if (matches.length === 0) {
     // 没有标题，整体作为一个段落
     return [{
       title: 'Thinking',
       content: text.trim(),
-      id: 'section-0',
+      id: `${prefix}section-0`,
     }];
   }
   
@@ -163,7 +165,7 @@ function parseReasoningSections(text: string): ReasoningSection[] {
     sections.push({
       title: current.title,
       content: content,
-      id: `section-${sectionIndex++}`,
+      id: `${prefix}section-${sectionIndex++}`,
     });
   }
   
@@ -438,7 +440,7 @@ export function ThinkingBlock({ items, isStreaming = false, currentReasoning = '
   
   // 解析当前流式 reasoning 为段落
   const currentSections = useMemo(() => {
-    return parseReasoningSections(currentReasoning);
+    return parseReasoningSections(currentReasoning, 'streaming-');
   }, [currentReasoning]);
   
   // 按原始顺序构建显示项列表
@@ -446,9 +448,12 @@ export function ThinkingBlock({ items, isStreaming = false, currentReasoning = '
     const result: DisplayItem[] = [];
     
     // 处理历史 items，保持原始顺序
-    for (const item of items) {
+    for (let itemIdx = 0; itemIdx < items.length; itemIdx++) {
+      const item = items[itemIdx];
       if (item.type === 'reasoning') {
-        const sections = parseReasoningSections(item.content);
+        // 为每个 reasoning item 生成唯一前缀
+        const idPrefix = `r${itemIdx}-${item.id || ''}-`;
+        const sections = parseReasoningSections(item.content, idPrefix);
         sections.forEach((section, idx) => {
           result.push({
             type: 'reasoning_section',
@@ -577,8 +582,10 @@ export function ThinkingBlock({ items, isStreaming = false, currentReasoning = '
                       />
                     );
                   } else {
+                    // 使用 callId 或 id 或 idx 作为 key，确保唯一性
+                    const toolKey = displayItem.item.callId || displayItem.item.id || `tool-${idx}`;
                     return (
-                      <ToolCallItemDisplay key={displayItem.item.id} item={displayItem.item} />
+                      <ToolCallItemDisplay key={toolKey} item={displayItem.item} />
                     );
                   }
                 })}

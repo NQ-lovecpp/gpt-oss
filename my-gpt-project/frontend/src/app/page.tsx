@@ -158,34 +158,64 @@ export default function Home() {
         break;
 
       case 'interruption':
-        // 需要审批 - 同样需要保留 reasoning
-        const interruptionHistoryWithReasoning = [...event.data.history];
-        
-        // 先将当前 reasoning 保存到 map
-        if (currentReasoningRef.current) {
-          for (let i = interruptionHistoryWithReasoning.length - 1; i >= 0; i--) {
-            const item = interruptionHistoryWithReasoning[i];
+        // 需要审批 - 合并前端收集的 reasoning items
+        setHistory(prev => {
+          // 从前端 history 中提取所有 reasoning_item
+          const frontendReasoningItems = prev.filter(
+            item => (item as any).type === 'reasoning_item'
+          );
+          
+          const serverHistory = [...event.data.history];
+          const mergedHistory: AgentInputItem[] = [];
+          
+          for (let i = 0; i < serverHistory.length; i++) {
+            const item = serverHistory[i];
+            
+            // 在 function_call 之前插入对应的 reasoning items
+            if (item.type === 'function_call') {
+              const matchingReasoning = frontendReasoningItems.find(r => {
+                const rIdx = prev.indexOf(r);
+                for (let j = rIdx + 1; j < prev.length; j++) {
+                  const nextItem = prev[j];
+                  if (nextItem.type === 'function_call') {
+                    return (nextItem as any).callId === (item as any).callId;
+                  }
+                  if ((nextItem as any).type === 'reasoning_item') break;
+                }
+                return false;
+              });
+              
+              if (matchingReasoning && !mergedHistory.includes(matchingReasoning)) {
+                mergedHistory.push(matchingReasoning);
+                const idx = frontendReasoningItems.indexOf(matchingReasoning);
+                if (idx > -1) frontendReasoningItems.splice(idx, 1);
+              }
+            }
+            
+            mergedHistory.push(item);
+            
             if (item.type === 'message' && item.role === 'assistant') {
               const msgId = item.id || `msg-${i}`;
-              reasoningMapRef.current.set(msgId, currentReasoningRef.current);
-              break;
+              const savedReasoning = reasoningMapRef.current.get(msgId);
+              if (savedReasoning) {
+                (item as any).reasoning = savedReasoning;
+              }
+              if (currentReasoningRef.current) {
+                reasoningMapRef.current.set(msgId, currentReasoningRef.current);
+                (item as any).reasoning = currentReasoningRef.current;
+              }
             }
           }
-        }
-        
-        // 恢复所有历史消息的 reasoning
-        for (let i = 0; i < interruptionHistoryWithReasoning.length; i++) {
-          const item = interruptionHistoryWithReasoning[i];
-          if (item.type === 'message' && item.role === 'assistant') {
-            const msgId = item.id || `msg-${i}`;
-            const savedReasoning = reasoningMapRef.current.get(msgId);
-            if (savedReasoning) {
-              (item as any).reasoning = savedReasoning;
-            }
+          
+          // 添加剩余的 reasoning items
+          if (frontendReasoningItems.length > 0) {
+            // 在最后添加（因为 interruption 时可能还没有 assistant message）
+            mergedHistory.push(...frontendReasoningItems);
           }
-        }
+          
+          return mergedHistory;
+        });
         
-        setHistory(interruptionHistoryWithReasoning);
         setApprovals(event.data.approvals);
         setIsStreaming(false);
         setStreamingText('');
@@ -194,34 +224,92 @@ export default function Home() {
         break;
 
       case 'done':
-        // 完成 - 将 reasoning 附加到消息并保留历史 reasoning
-        const historyWithReasoning = [...event.data.history];
-        
-        // 先将当前 reasoning 保存到 map（找到最后一条 assistant 消息）
-        if (currentReasoningRef.current) {
-          for (let i = historyWithReasoning.length - 1; i >= 0; i--) {
-            const item = historyWithReasoning[i];
+        // 完成 - 合并前端收集的 reasoning items 和服务端的 history
+        setHistory(prev => {
+          // 从前端 history 中提取所有 reasoning_item
+          const frontendReasoningItems = prev.filter(
+            item => (item as any).type === 'reasoning_item'
+          );
+          
+          // 从服务端 history 构建新的 history，保留 reasoning items
+          const serverHistory = [...event.data.history];
+          const mergedHistory: AgentInputItem[] = [];
+          
+          // 用于追踪服务端 history 中的 function_call 位置
+          let lastUserMsgIdx = -1;
+          
+          for (let i = 0; i < serverHistory.length; i++) {
+            const item = serverHistory[i];
+            
+            if (item.type === 'message' && item.role === 'user') {
+              lastUserMsgIdx = mergedHistory.length;
+            }
+            
+            // 在第一个 function_call 之前插入对应的 reasoning items
+            if (item.type === 'function_call') {
+              // 查找前端对应的 reasoning item（在这个 function_call 之前的）
+              const matchingReasoning = frontendReasoningItems.find(r => {
+                // 查找前端 history 中这个 reasoning 后面紧跟的 function_call
+                const rIdx = prev.indexOf(r);
+                for (let j = rIdx + 1; j < prev.length; j++) {
+                  const nextItem = prev[j];
+                  if (nextItem.type === 'function_call') {
+                    return (nextItem as any).callId === (item as any).callId;
+                  }
+                  if ((nextItem as any).type === 'reasoning_item') {
+                    break; // 遇到下一个 reasoning，停止
+                  }
+                }
+                return false;
+              });
+              
+              if (matchingReasoning && !mergedHistory.includes(matchingReasoning)) {
+                mergedHistory.push(matchingReasoning);
+                // 从待处理列表中移除
+                const idx = frontendReasoningItems.indexOf(matchingReasoning);
+                if (idx > -1) frontendReasoningItems.splice(idx, 1);
+              }
+            }
+            
+            mergedHistory.push(item);
+            
+            // 在 assistant message 上附加 reasoning
             if (item.type === 'message' && item.role === 'assistant') {
               const msgId = item.id || `msg-${i}`;
-              reasoningMapRef.current.set(msgId, currentReasoningRef.current);
-              break;
+              const savedReasoning = reasoningMapRef.current.get(msgId);
+              if (savedReasoning) {
+                (item as any).reasoning = savedReasoning;
+              }
+              // 保存当前的 reasoning 到 map
+              if (currentReasoningRef.current) {
+                reasoningMapRef.current.set(msgId, currentReasoningRef.current);
+                (item as any).reasoning = currentReasoningRef.current;
+              }
             }
           }
-        }
-        
-        // 恢复所有历史消息的 reasoning
-        for (let i = 0; i < historyWithReasoning.length; i++) {
-          const item = historyWithReasoning[i];
-          if (item.type === 'message' && item.role === 'assistant') {
-            const msgId = item.id || `msg-${i}`;
-            const savedReasoning = reasoningMapRef.current.get(msgId);
-            if (savedReasoning) {
-              (item as any).reasoning = savedReasoning;
+          
+          // 如果还有剩余的 reasoning items（最后一个 reasoning 在所有 tool calls 之后）
+          // 添加到最后一个 assistant message 之前
+          if (frontendReasoningItems.length > 0) {
+            // 找到最后一个 assistant message 的位置
+            let lastAssistantIdx = -1;
+            for (let i = mergedHistory.length - 1; i >= 0; i--) {
+              const histItem = mergedHistory[i];
+              if (histItem.type === 'message' && (histItem as any).role === 'assistant') {
+                lastAssistantIdx = i;
+                break;
+              }
+            }
+            
+            if (lastAssistantIdx > -1) {
+              // 在最后一个 assistant message 之前插入剩余的 reasoning
+              mergedHistory.splice(lastAssistantIdx, 0, ...frontendReasoningItems);
             }
           }
-        }
+          
+          return mergedHistory;
+        });
         
-        setHistory(historyWithReasoning);
         setApprovals([]);
         setIsStreaming(false);
         setStreamingText('');
