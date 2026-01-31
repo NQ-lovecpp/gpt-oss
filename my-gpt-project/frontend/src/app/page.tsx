@@ -158,59 +158,97 @@ export default function Home() {
         break;
 
       case 'interruption':
-        // 需要审批 - 合并前端收集的 reasoning items
+        // 需要审批 - 保留所有历史 reasoning，按正确位置插入
+        const interruptCurrentReasoning = currentReasoningRef.current;
+        
         setHistory(prev => {
-          // 从前端 history 中提取所有 reasoning_item
-          const frontendReasoningItems = prev.filter(
-            item => (item as any).type === 'reasoning_item'
-          );
-          
           const serverHistory = [...event.data.history];
           const mergedHistory: AgentInputItem[] = [];
           
-          for (let i = 0; i < serverHistory.length; i++) {
-            const item = serverHistory[i];
-            
-            // 在 function_call 之前插入对应的 reasoning items
-            if (item.type === 'function_call') {
-              const matchingReasoning = frontendReasoningItems.find(r => {
-                const rIdx = prev.indexOf(r);
-                for (let j = rIdx + 1; j < prev.length; j++) {
-                  const nextItem = prev[j];
-                  if (nextItem.type === 'function_call') {
-                    return (nextItem as any).callId === (item as any).callId;
-                  }
-                  if ((nextItem as any).type === 'reasoning_item') break;
+          // 从 prev 中构建 reasoning 位置映射（与 done 事件相同逻辑）
+          const reasoningBeforeCall = new Map<string, AgentInputItem>();
+          let firstReasoning: AgentInputItem | null = null;
+          let foundFirstCall = false;
+          let lastReasoning: AgentInputItem | null = null;
+          
+          for (let i = 0; i < prev.length; i++) {
+            const item = prev[i];
+            if ((item as any).type === 'reasoning_item') {
+              let foundCall = false;
+              for (let j = i + 1; j < prev.length; j++) {
+                if (prev[j].type === 'function_call') {
+                  const callId = (prev[j] as any).callId;
+                  reasoningBeforeCall.set(callId, item);
+                  foundCall = true;
+                  foundFirstCall = true;
+                  break;
                 }
-                return false;
-              });
-              
-              if (matchingReasoning && !mergedHistory.includes(matchingReasoning)) {
-                mergedHistory.push(matchingReasoning);
-                const idx = frontendReasoningItems.indexOf(matchingReasoning);
-                if (idx > -1) frontendReasoningItems.splice(idx, 1);
+                if ((prev[j] as any).type === 'reasoning_item') break;
               }
-            }
-            
-            mergedHistory.push(item);
-            
-            if (item.type === 'message' && item.role === 'assistant') {
-              const msgId = item.id || `msg-${i}`;
-              const savedReasoning = reasoningMapRef.current.get(msgId);
-              if (savedReasoning) {
-                (item as any).reasoning = savedReasoning;
-              }
-              if (currentReasoningRef.current) {
-                reasoningMapRef.current.set(msgId, currentReasoningRef.current);
-                (item as any).reasoning = currentReasoningRef.current;
+              if (!foundCall) {
+                if (!foundFirstCall) {
+                  firstReasoning = item;
+                } else {
+                  lastReasoning = item;
+                }
               }
             }
           }
           
-          // 添加剩余的 reasoning items
-          if (frontendReasoningItems.length > 0) {
-            // 在最后添加（因为 interruption 时可能还没有 assistant message）
-            mergedHistory.push(...frontendReasoningItems);
+          const insertedReasonings = new Set<AgentInputItem>();
+          
+          for (let i = 0; i < serverHistory.length; i++) {
+            const item = serverHistory[i];
+            
+            if (item.type === 'function_call') {
+              const callId = (item as any).callId;
+              const reasoning = reasoningBeforeCall.get(callId);
+              if (reasoning && !insertedReasonings.has(reasoning)) {
+                mergedHistory.push(reasoning);
+                insertedReasonings.add(reasoning);
+              }
+              mergedHistory.push(item);
+            } else if (item.type === 'message' && item.role === 'user') {
+              mergedHistory.push(item);
+            } else if (item.type === 'message' && item.role === 'assistant') {
+              if (lastReasoning && !insertedReasonings.has(lastReasoning)) {
+                mergedHistory.push(lastReasoning);
+                insertedReasonings.add(lastReasoning);
+              }
+              mergedHistory.push(item);
+            } else {
+              mergedHistory.push(item);
+            }
+          }
+          
+          // 如果 firstReasoning 还没插入
+          if (firstReasoning && !insertedReasonings.has(firstReasoning)) {
+            let insertIdx = -1;
+            for (let i = 0; i < mergedHistory.length; i++) {
+              const histItem = mergedHistory[i];
+              if (histItem.type === 'message' && (histItem as any).role === 'user') {
+                insertIdx = i + 1;
+                break;
+              }
+            }
+            if (insertIdx > -1) {
+              mergedHistory.splice(insertIdx, 0, firstReasoning);
+              insertedReasonings.add(firstReasoning);
+            }
+          }
+          
+          // 确保当前轮次的 reasoning 已添加
+          if (interruptCurrentReasoning) {
+            const hasCurrentReasoning = mergedHistory.some(
+              h => (h as any).type === 'reasoning_item' && (h as any).content === interruptCurrentReasoning
+            );
+            if (!hasCurrentReasoning) {
+              mergedHistory.push({
+                type: 'reasoning_item',
+                content: interruptCurrentReasoning,
+                id: `reasoning-interrupt-${Date.now()}`,
+              } as unknown as AgentInputItem);
+            }
           }
           
           return mergedHistory;
@@ -224,86 +262,112 @@ export default function Home() {
         break;
 
       case 'done':
-        // 完成 - 合并前端收集的 reasoning items 和服务端的 history
+        // 完成 - 保留所有历史 reasoning，按正确位置插入
+        const doneCurrentReasoning = currentReasoningRef.current;
+        
         setHistory(prev => {
-          // 从前端 history 中提取所有 reasoning_item
-          const frontendReasoningItems = prev.filter(
-            item => (item as any).type === 'reasoning_item'
-          );
-          
-          // 从服务端 history 构建新的 history，保留 reasoning items
           const serverHistory = [...event.data.history];
           const mergedHistory: AgentInputItem[] = [];
           
-          // 用于追踪服务端 history 中的 function_call 位置
-          let lastUserMsgIdx = -1;
+          // 从 prev 中构建 reasoning 位置映射
+          // Map: function_call 的 callId -> 在它之前的 reasoning_item
+          const reasoningBeforeCall = new Map<string, AgentInputItem>();
+          // 第一个 reasoning（在任何 function_call 之前，user message 之后）
+          let firstReasoning: AgentInputItem | null = null;
+          let foundFirstCall = false;
+          // 最后一个 reasoning（在所有 function_call 之后）
+          let lastReasoning: AgentInputItem | null = null;
+          let lastReasoningIdx = -1;
           
-          for (let i = 0; i < serverHistory.length; i++) {
-            const item = serverHistory[i];
-            
-            if (item.type === 'message' && item.role === 'user') {
-              lastUserMsgIdx = mergedHistory.length;
-            }
-            
-            // 在第一个 function_call 之前插入对应的 reasoning items
-            if (item.type === 'function_call') {
-              // 查找前端对应的 reasoning item（在这个 function_call 之前的）
-              const matchingReasoning = frontendReasoningItems.find(r => {
-                // 查找前端 history 中这个 reasoning 后面紧跟的 function_call
-                const rIdx = prev.indexOf(r);
-                for (let j = rIdx + 1; j < prev.length; j++) {
-                  const nextItem = prev[j];
-                  if (nextItem.type === 'function_call') {
-                    return (nextItem as any).callId === (item as any).callId;
-                  }
-                  if ((nextItem as any).type === 'reasoning_item') {
-                    break; // 遇到下一个 reasoning，停止
-                  }
+          // 遍历 prev，记录每个 reasoning 的位置
+          for (let i = 0; i < prev.length; i++) {
+            const item = prev[i];
+            if ((item as any).type === 'reasoning_item') {
+              // 查找这个 reasoning 之后的第一个 function_call
+              let foundCall = false;
+              for (let j = i + 1; j < prev.length; j++) {
+                if (prev[j].type === 'function_call') {
+                  const callId = (prev[j] as any).callId;
+                  reasoningBeforeCall.set(callId, item);
+                  foundCall = true;
+                  foundFirstCall = true;
+                  break;
                 }
-                return false;
-              });
-              
-              if (matchingReasoning && !mergedHistory.includes(matchingReasoning)) {
-                mergedHistory.push(matchingReasoning);
-                // 从待处理列表中移除
-                const idx = frontendReasoningItems.indexOf(matchingReasoning);
-                if (idx > -1) frontendReasoningItems.splice(idx, 1);
+                if ((prev[j] as any).type === 'reasoning_item') {
+                  break; // 遇到下一个 reasoning，停止
+                }
               }
-            }
-            
-            mergedHistory.push(item);
-            
-            // 在 assistant message 上附加 reasoning
-            if (item.type === 'message' && item.role === 'assistant') {
-              const msgId = item.id || `msg-${i}`;
-              const savedReasoning = reasoningMapRef.current.get(msgId);
-              if (savedReasoning) {
-                (item as any).reasoning = savedReasoning;
-              }
-              // 保存当前的 reasoning 到 map
-              if (currentReasoningRef.current) {
-                reasoningMapRef.current.set(msgId, currentReasoningRef.current);
-                (item as any).reasoning = currentReasoningRef.current;
+              if (!foundCall) {
+                // 这个 reasoning 后面没有 function_call
+                if (!foundFirstCall) {
+                  firstReasoning = item;
+                } else {
+                  lastReasoning = item;
+                  lastReasoningIdx = i;
+                }
               }
             }
           }
           
-          // 如果还有剩余的 reasoning items（最后一个 reasoning 在所有 tool calls 之后）
-          // 添加到最后一个 assistant message 之前
-          if (frontendReasoningItems.length > 0) {
-            // 找到最后一个 assistant message 的位置
-            let lastAssistantIdx = -1;
-            for (let i = mergedHistory.length - 1; i >= 0; i--) {
+          // 记录已插入的 reasoning，避免重复
+          const insertedReasonings = new Set<AgentInputItem>();
+          
+          for (let i = 0; i < serverHistory.length; i++) {
+            const item = serverHistory[i];
+            
+            if (item.type === 'function_call') {
+              // 在 function_call 之前插入对应的 reasoning
+              const callId = (item as any).callId;
+              const reasoning = reasoningBeforeCall.get(callId);
+              if (reasoning && !insertedReasonings.has(reasoning)) {
+                mergedHistory.push(reasoning);
+                insertedReasonings.add(reasoning);
+              }
+              mergedHistory.push(item);
+            } else if (item.type === 'message' && item.role === 'user') {
+              mergedHistory.push(item);
+              // 在 user message 之后，如果有 firstReasoning 且还没插入
+              // 需要判断这是否是当前轮次的 user message
+            } else if (item.type === 'message' && item.role === 'assistant') {
+              // 在 assistant message 之前，插入最后的 reasoning
+              if (lastReasoning && !insertedReasonings.has(lastReasoning)) {
+                mergedHistory.push(lastReasoning);
+                insertedReasonings.add(lastReasoning);
+              } else if (doneCurrentReasoning && !insertedReasonings.has(doneCurrentReasoning as any)) {
+                // 如果还有未保存的当前 reasoning
+                const hasThisReasoning = mergedHistory.some(
+                  h => (h as any).type === 'reasoning_item' && (h as any).content === doneCurrentReasoning
+                );
+                if (!hasThisReasoning) {
+                  mergedHistory.push({
+                    type: 'reasoning_item',
+                    content: doneCurrentReasoning,
+                    id: `reasoning-${Date.now()}`,
+                  } as unknown as AgentInputItem);
+                }
+              }
+              
+              mergedHistory.push(item);
+            } else {
+              // 其他类型（如 function_call_result）
+              mergedHistory.push(item);
+            }
+          }
+          
+          // 如果 firstReasoning 还没插入（没有任何 function_call 的情况）
+          if (firstReasoning && !insertedReasonings.has(firstReasoning)) {
+            // 找到第一个 user message 之后的位置插入
+            let insertIdx = -1;
+            for (let i = 0; i < mergedHistory.length; i++) {
               const histItem = mergedHistory[i];
-              if (histItem.type === 'message' && (histItem as any).role === 'assistant') {
-                lastAssistantIdx = i;
+              if (histItem.type === 'message' && (histItem as any).role === 'user') {
+                insertIdx = i + 1;
                 break;
               }
             }
-            
-            if (lastAssistantIdx > -1) {
-              // 在最后一个 assistant message 之前插入剩余的 reasoning
-              mergedHistory.splice(lastAssistantIdx, 0, ...frontendReasoningItems);
+            if (insertIdx > -1) {
+              mergedHistory.splice(insertIdx, 0, firstReasoning);
+              insertedReasonings.add(firstReasoning);
             }
           }
           
@@ -333,11 +397,14 @@ export default function Home() {
     message?: string;
     decisions?: Map<string, 'approved' | 'rejected'>;
   }) {
-    const messages = [...history];
+    // 过滤掉 reasoning_item，因为后端不支持这个类型
+    // reasoning_item 只在前端用于显示，不应发送到后端
+    const messages = history.filter(item => (item as any).type !== 'reasoning_item');
 
     if (message) {
       messages.push({ type: 'message', role: 'user', content: message });
-      setHistory(messages);
+      // 保留 reasoning_item 用于显示，但添加新的用户消息
+      setHistory([...history, { type: 'message', role: 'user', content: message } as AgentInputItem]);
     }
 
     setIsStreaming(true);
