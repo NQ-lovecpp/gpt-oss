@@ -103,7 +103,7 @@ export async function getAgent(): Promise<Agent> {
           modelSettings: {
             providerData: {
               reasoning: {
-                effort: 'medium'
+                effort: 'high'
               },
             }
           },
